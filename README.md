@@ -1,2 +1,2 @@
-# RelationalDBsLabs
-Labs for course "Relational Databases"
+# DB Labs
+kpi databases course sources
