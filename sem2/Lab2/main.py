@@ -1,164 +1,188 @@
 import redis
-import atexit
+
+import worker
+import general
+import listen
+import string
+
+import time
+from random import random, sample, randint
+from typing import Optional, List
+
+def random_text():
+    letters = string.ascii_lowercase
+    return ''.join(random.choice(letters) for i in range(20))
+
+class User:
+    conn: redis.Redis
+    token: Optional[str]
+    username: Optional[str]
+
+    def __init__(self, conn: Optional = None, username = None):
+        self.conn = conn or general.connect()
+        self.token = None
+        self.username = None
+
+        if username is not None:
+            self.username = username
+            self.token = general.login(self.conn, username)
 
 
-def register(conn, username):
-    if conn.hget('users:', username):
-        return None
+    def register(self, username: str):
+        general.register(self.conn, username)
+        self.username = username
 
-    user_id = conn.incr('user:id:')
-
-    pipeline = conn.pipeline(True)
-
-    pipeline.hset('users:', username, user_id)
-
-    pipeline.hmset('user:%s' % user_id, {
-        'login': username,
-        'id': user_id,
-        'queue': 0,
-        'checking': 0,
-        'blocked': 0,
-        'sent': 0,
-        'delivered': 0
-    })
-    pipeline.execute()
-    return user_id
-
-
-def sign_in(conn, username) -> int:
-    user_id = conn.hget("users:", username)
-
-    if not user_id:
-        print("Current user does not exist %s" % username)
-        return -1
-
-    conn.sadd("online:", username)
-    return int(user_id)
-
-
-def sign_out(conn, user_id) -> int:
-    return conn.srem("online:", conn.hmget("user:%s" % user_id, ["login"])[0])
-
-
-def create_message(conn, message_text, sender_id, consumer) -> int:
-    message_id = int(conn.incr('message:id:'))
-    consumer_id = int(conn.hget("users:", consumer))
-
-    if not consumer_id:
-        print("Current user does not exist %s, unable to send message" % consumer)
-        return
-
-    pipeline = conn.pipeline(True)
-
-    pipeline.hmset('message:%s' % message_id, {
-        'text': message_text,
-        'id': message_id,
-        'sender_id': sender_id,
-        'consumer_id': consumer_id,
-        'status': "created"
-    })
-    pipeline.lpush("queue:", message_id)
-    pipeline.hmset('message:%s' % message_id, {
-        'status': 'queue'
-    })
-    pipeline.zincrby("sent:", 1, "user:%s" % conn.hmget("user:%s" % sender_id, ["login"])[0])
-    pipeline.hincrby("user:%s" % sender_id, "queue", 1)
-    pipeline.execute()
-
-    return message_id
-
-
-def print_messages(connection, user_id):
-    messages = connection.smembers("sentto:%s" % user_id)
-    for message_id in messages:
-        message = connection.hmget("message:%s" % message_id, ["sender_id", "text", "status"])
-        sender_id = message[0]
-        print("From: %s - %s" % (connection.hmget("user:%s" % sender_id, ["login"])[0], message[1]))
-        if message[2] != "delivered":
-            pipeline = connection.pipeline(True)
-            pipeline.hset("message:%s" % message_id, "status", "delivered")
-            pipeline.hincrby("user:%s" % sender_id, "sent", -1)
-            pipeline.hincrby("user:%s" % sender_id, "delivered", 1)
-            pipeline.execute()
-
-
-def main_menu() -> int:
-    print(30 * "-", "MENU", 30 * "-")
-    print("1. Register")
-    print("2. Login")
-    print("3. Exit")
-    return int(input("Enter your choice [1-3]: "))
-
-
-def user_menu() -> int:
-    print(30 * "-", "MENU", 30 * "-")
-    print("1. Sign out")
-    print("2. Send message")
-    print("3. Inbox messages")
-    print("4. My messages statistic")
-    return int(input("Enter your choice [1-4]: "))
-
-
-def main():
-    def exit_handler():
-        sign_out(connection, current_user_id)
-
-    atexit.register(exit_handler)
-    loop = True
-    signed_in = False
-    current_user_id = -1
-    connection = redis.Redis(charset="utf-8", decode_responses=True)
-    menu = main_menu
-
-    while loop:
-        choice = menu()
-
-        if choice == 1:
-            if not signed_in:
-                login = input("Enter your username:")
-                register(connection, login)
-            else:
-                sign_out(connection, current_user_id)
-                connection.publish('users', "User %s signed out"
-                                   % connection.hmget("user:%s" % current_user_id, ["login"])[0])
-                signed_in = False
-                current_user_id = -1
-                menu = main_menu
-
-        elif choice == 2:
-            if signed_in:
-                message = input("Enter message text:")
-                recipient = input("Enter recipient username:")
-
-                if create_message(connection, message, current_user_id, recipient):
-                    print("Sending message...")
-            else:
-                login = input("Enter your login:")
-                current_user_id = sign_in(connection, login)
-                signed_in = current_user_id != -1
-                if signed_in:
-                    connection.publish('users', "User %s signed in"
-                                       % connection.hmget("user:%s" % current_user_id, ["login"])[0])
-                    menu = user_menu
-
-        elif choice == 3:
-            if signed_in:
-                print_messages(connection, current_user_id)
-            else:
-                loop = False
-
-        elif choice == 4:
-            current_user = connection.hmget("user:%s" % current_user_id,
-                                            ['queue', 'checking', 'blocked', 'sent', 'delivered'])
-            print("In queue: %s\nChecking: %s\nBlocked: %s\nSent: %s\nDelivered: %s" %
-                  tuple(current_user))
+    def login(self, username: str):
+        self.token = general.login(self.conn, username)
+        if self.token:
+            self.username = username
         else:
-            print("Wrong option selection. Enter any key to try again..")
+            print('User does not exist' % username)
+            return
+
+    def logout(self):
+        if self.token is not None:
+            general.logout(self.conn, self.token)
+            self.token = None
+
+    def send(self, username: str, text: str):
+        if self.token is None:
+            print('You are not logged in')
+            return
+
+        user = general.get_user(self.conn, username)
+        if user is None:
+            print('User %s does not exist' % username)
+            return
+        general.send_message(self.conn, self.token, user, text)
+
+    def stats(self):
+        if self.token is None:
+            print('You are not logged in')
+            return
+
+        user = self.conn.get(self.token)
+        general.get_message_stats(self.conn, user)
+
+    def inbox(self):
+        if self.token is None:
+            print('You are not logged in')
+            return
+
+        general.print_messages(self.conn, self.token)
+
+class Emulate:
+    def __init__(self, usernames: List[str]):
+        self.conn = general.connect()
+        self.usernames = usernames
+        for name in usernames:
+            if general.get_user(self.conn, name) is None:
+                general.register(self.conn, name)
+
+        self.users = [User(self.conn, username=name) for name in usernames]
+
+    def run(self):
+        while True:
+            time.sleep(random())
+            user = sample(self.users, 1)[0]
+            target = sample(self.usernames, 1)[0]
+            user.send(target, random_text())
+            print('%s sent message to %s' % (user.username, target))
 
 
+class Worker:
+    conn: redis.Redis
+    msg: Optional[str]
+
+    def __init__(self, conn: Optional[redis.Redis] = None):
+        self.conn = conn or general.connect()
+        self.msg = None
+
+    def next(self, silent: bool = False):
+        self.msg = worker.next_message(self.conn)
+        if self.msg is None and not silent:
+            print('No messages in queue as of now')
+
+    def spam(self):
+        if self.msg is None:
+            print('You have not selected a message')
+            return
+
+        worker.mark_as_spam(self.conn, self.msg)
+        self.msg = None
+
+    def deliver(self):
+        if self.msg is None:
+            print('You have not selected a message')
+            return
+
+        worker.deliver(self.conn, self.msg)
+        self.msg = None
+
+    def auto(self):
+        while True:
+            self.next(silent=True)
+            if self.msg is None:
+                time.sleep(0.1)
+                continue
+            print('Checking for spam')
+            time.sleep(random())
+            if random() < 0.3:
+                print('Spam detected')
+                self.spam()
+            else:
+                print('No spam detected')
+                self.deliver()
 
 
+class Admin:
+    conn: redis.Redis
+
+    def __init__(self, conn = None):
+        self.conn = conn or general.connect()
+
+    def get_usernames(self, users: List[str]):
+        p = self.conn.pipeline()
+        for user in users:
+            p.hget(user, 'username')
+
+        return [str(name) for name in p.execute()]
+
+    def online(self):
+        users = self.conn.smembers('logged-in')
+        print('Online:')
+        for user in self.get_usernames(users):
+            print(user)
+
+    def most_active(self, n: int):
+        users_scores = list(zip(*self.conn.zrange('user:sent', 0, n)))
+        if len(users_scores) < 2:
+            print('No users found')
+            return
+
+        print('Most active:')
+        users, scores = users_scores
+        for user, score in zip(self.get_usernames(users), scores):
+            print('%s: %s' % (user, score))
+
+    def spammers(self, n: int):
+        users_scores = list(zip(*self.conn.zrange('user:trash', 0, n)))
+        if len(users_scores) < 2:
+            print('No users found')
+            return
+
+        print('spammers:')
+        users = users_scores[0]
+        scores = users_scores[1]
+        for user, score in zip(self.get_usernames(users), scores):
+            print('%s: %s' % (user, score))
 
 
-if __name__ == '__main__':
-    main()
+class LoginListener:
+    conn: redis.Redis
+
+    def __init__(self, conn: Optional[redis.Redis] = None):
+        self.conn = conn or general.connect()
+
+    def listen(self):
+        listen.listen(self.conn)
