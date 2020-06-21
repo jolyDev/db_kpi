@@ -11,7 +11,7 @@ class database:
     def __init__(self):
         self.base = redis.StrictRedis(host=redis_host, port=redis_port, password=redis_password, decode_responses=True)
         self.id = 0
-        self.DATA_ID = "prosthesis"
+        self.DATA_ID = "test"
 
     def save(self, filename):
         with open(filename, 'w') as f:
