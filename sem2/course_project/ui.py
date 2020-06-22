@@ -58,4 +58,3 @@ def menu():
         return
 
     menu()
-
